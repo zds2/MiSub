@@ -13,6 +13,7 @@
     import { useBackupLogic } from '../../../composables/useBackupLogic.js';
     import { storeToRefs } from 'pinia';
     import { useI18n } from '@/i18n/index.js';
+    import { readRawPreference, writeRawPreference } from '@/utils/local-preference.js';
 
     const isDev = import.meta.env.DEV;
 
@@ -271,7 +272,7 @@
     onMounted(() => {
         initializeState();
         window.addEventListener('beforeunload', handleBeforeUnload);
-        const savedViewMode = localStorage.getItem('manualNodeViewMode');
+        const savedViewMode = readRawPreference('manualNodeViewMode');
         if (savedViewMode) {
             manualNodeViewMode.value = savedViewMode;
         }
@@ -297,7 +298,7 @@
 
     const setViewMode = (mode) => {
         manualNodeViewMode.value = mode;
-        localStorage.setItem('manualNodeViewMode', mode);
+        writeRawPreference('manualNodeViewMode', mode);
     };
 
     // --- 其他 JS 逻辑 (省略) ---
@@ -401,6 +402,16 @@
         showToast(t('manualNodes.groupOrderUpdated'), 'success');
     };
 
+    // 应用识别到的机场名（来自订阅响应头 / 官网标题）
+    const handleApplyDetectedName = (subscriptionId, name) => {
+        const target = String(name || '').trim();
+        if (!target) return;
+        const subscription = subscriptions.value.find((s) => s.id === subscriptionId);
+        if (!subscription) return;
+        updateSubscription(subscriptionId, { name: target });
+        showToast(t('subscriptions.nameApplied', { name: target }), 'success');
+    };
+
     // 节点预览处理函数
     const handlePreviewSubscription = (subscriptionId) => {
         const subscription = subscriptions.value.find((s) => s.id === subscriptionId);
@@ -491,6 +502,7 @@
                     @update-node-count="handleUpdateNodeCount"
                     @refresh-all="batchUpdateAllSubscriptions"
                     @edit="(id) => handleEditSubscription(subscriptions.find((s) => s.id === id))"
+                    @applyDetectedName="handleApplyDetectedName"
                     @toggle-sort="isSortingSubs = !isSortingSubs"
                     @mark-dirty="markDirty"
                     @delete-all="showDeleteSubsModal = true"
@@ -586,7 +598,9 @@
                 {{ t('subscriptions.deleteAllConfirmTitle') }}
             </h3> </template
         ><template #body>
-            <p class="text-sm text-gray-400">{{ t('subscriptions.deleteAllConfirmBody') }}</p>
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+                {{ t('subscriptions.deleteAllConfirmBody') }}
+            </p>
         </template></Modal
     >
     <Modal v-model:show="showDeleteNodesModal" @confirm="handleDeleteAllNodesWithCleanup"
@@ -595,7 +609,9 @@
                 {{ t('manualNodes.deleteAllConfirmTitle') }}
             </h3> </template
         ><template #body>
-            <p class="text-sm text-gray-400">{{ t('manualNodes.deleteAllConfirmBody') }}</p>
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+                {{ t('manualNodes.deleteAllConfirmBody') }}
+            </p>
         </template></Modal
     >
     <Modal v-model:show="showBatchDeleteModal" @confirm="confirmBatchDelete">
@@ -616,7 +632,9 @@
                 {{ t('profiles.deleteAllConfirmTitle') }}
             </h3> </template
         ><template #body>
-            <p class="text-sm text-gray-400">{{ t('profiles.deleteAllConfirmBody') }}</p>
+            <p class="text-sm text-gray-500 dark:text-gray-400">
+                {{ t('profiles.deleteAllConfirmBody') }}
+            </p>
         </template></Modal
     >
 

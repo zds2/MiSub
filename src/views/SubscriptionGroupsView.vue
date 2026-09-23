@@ -1,5 +1,6 @@
 <script setup>
-    import { ref, defineAsyncComponent, computed } from 'vue';
+    import { ref, defineAsyncComponent, computed, onMounted, watch } from 'vue';
+    import { useRoute, useRouter } from 'vue-router';
     import { extractNodeName } from '../lib/utils.js';
     import { useDataStore } from '../stores/useDataStore.js';
     import { useSubscriptions } from '../composables/useSubscriptions.js';
@@ -12,11 +13,19 @@
     import SubscriptionEditModal from '../components/modals/SubscriptionEditModal.vue';
     import { useToastStore } from '../stores/toast.js';
     import { useI18n } from '../i18n/index.js';
+    import { inferAirportRootDomain } from '../utils/airport-domain.js';
+    import { rememberDomainName } from '../utils/domain-name-memory.js';
+    import {
+        resolveSubscriptionStatusFilter,
+        matchesSubscriptionStatus,
+    } from '../utils/dashboard-deeplink.js';
 
     const dataStore = useDataStore();
     const { showToast } = useToastStore();
     const { markDirty } = dataStore;
     const { t } = useI18n();
+    const route = useRoute();
+    const router = useRouter();
 
     // State
     // State
@@ -84,6 +93,48 @@
     const previewSubscriptionName = ref('');
     const previewSubscriptionUrl = ref('');
 
+    // 一键重命名整个折叠组：用「识别名 + 两位序号」避免重名（同机场多账号场景）
+    const handleRenameGroup = (ids, baseName) => {
+        const base = String(baseName || '').trim();
+        if (!base || !Array.isArray(ids) || ids.length === 0) return;
+
+        const pad = String(ids.length).length;
+        let renamed = 0;
+
+        ids.forEach((id, index) => {
+            const targetSub = subscriptions.value.find((s) => s.id === id);
+            if (!targetSub) return;
+            const seq = String(index + 1).padStart(pad, '0');
+            // 单个订阅时不需要序号
+            const newName = ids.length > 1 ? `${base} ${seq}` : base;
+            if (targetSub.name === newName) return;
+            updateSubscription({ ...targetSub, name: newName });
+            renamed++;
+        });
+
+        if (renamed > 0) {
+            // 记住「域名 -> 机场名」，下次同域名的订阅可直接套用
+            const first = subscriptions.value.find((s) => s.id === ids[0]);
+            const dom = first ? inferAirportRootDomain(first.url) : '';
+            if (dom) rememberDomainName(dom, base);
+            showToast(t('subscriptions.groupRenamed', { name: base, count: renamed }), 'success');
+        }
+    };
+
+    // 应用识别到的机场名（来自订阅响应头 / 官网标题）
+    const handleApplyDetectedName = (subscriptionId, name) => {
+        const target = String(name || '').trim();
+        if (!target) return;
+        // useSubscriptions 的 updateSubscription 接收「完整订阅对象」而非 (id, patch)
+        const targetSub = subscriptions.value.find((s) => s.id === subscriptionId);
+        if (!targetSub) return;
+        updateSubscription({ ...targetSub, name: target });
+        // 记住「域名 -> 机场名」，下次同域名的订阅可直接套用
+        const dom = inferAirportRootDomain(targetSub.url);
+        if (dom) rememberDomainName(dom, target);
+        showToast(t('subscriptions.nameApplied', { name: target }), 'success');
+    };
+
     const handlePreviewSubscription = (subscriptionId) => {
         const subscription = subscriptions.value.find((s) => s.id === subscriptionId);
         if (subscription) {
@@ -113,19 +164,69 @@
             showQRCodeModal.value = true;
         }
     };
+
+    // --- Dashboard deep-link status filter (?status=error / expired / ...) ---
+    // The dashboard health cards link here with a status. Previously the query
+    // was dropped, so the user landed on an unfiltered list.
+    const activeStatusFilter = ref('');
+    const STATUS_FILTER_LABEL_KEYS = {
+        disabled: 'subscriptions.filterStatusDisabled',
+        error: 'subscriptions.filterStatusError',
+        expired: 'subscriptions.filterStatusExpired',
+        'low-traffic': 'subscriptions.filterStatusLowTraffic',
+        'zero-nodes': 'subscriptions.filterStatusZeroNodes',
+    };
+
+    const statusFilterLabel = computed(() => {
+        const key = STATUS_FILTER_LABEL_KEYS[activeStatusFilter.value];
+        return key ? t(key) : '';
+    });
+
+    // Subscriptions matching the active status filter, before search/pagination.
+    const statusFilteredSubscriptions = computed(() => {
+        if (!activeStatusFilter.value) return subscriptions.value;
+        return subscriptions.value.filter((sub) =>
+            matchesSubscriptionStatus(sub, activeStatusFilter.value)
+        );
+    });
+
+    function applyStatusFromQuery() {
+        activeStatusFilter.value = resolveSubscriptionStatusFilter(route.query?.status) || '';
+    }
+
+    const clearStatusFilter = () => {
+        activeStatusFilter.value = '';
+        if (route.query?.status) {
+            const nextQuery = { ...route.query };
+            delete nextQuery.status;
+            router.replace({ query: nextQuery });
+        }
+    };
+
+    onMounted(applyStatusFromQuery);
+    watch(() => route.query.status, applyStatusFromQuery);
+
+    // `subscriptions` is the prop the panel renders; when a status filter is
+    // active we narrow it so the list, the count and pagination all agree.
+    const visibleSubscriptions = computed(() =>
+        activeStatusFilter.value ? statusFilteredSubscriptions.value : subscriptions.value
+    );
 </script>
 
 <template>
     <div class="max-w-(--breakpoint-xl) mx-auto">
         <SubscriptionPanel
-            :subscriptions="subscriptions"
+            :subscriptions="visibleSubscriptions"
             :paginated-subscriptions="paginatedSubscriptions"
             :search-query="subscriptionSearchQuery"
             :filtered-count="filteredSubscriptions.length"
+            :status-filter="activeStatusFilter"
+            :status-filter-label="statusFilterLabel"
             :current-page="subsCurrentPage"
             :total-pages="subsTotalPages"
             :is-sorting="isSortingSubs"
             searchable
+            @clear-status-filter="clearStatusFilter"
             @add="handleAddSubscription"
             @delete="handleDeleteSubscriptionWithCleanup"
             @change-page="changeSubsPage"
@@ -140,6 +241,8 @@
             @import="openBulkImportModal"
             @qrcode="handleQRCode"
             @update-search="subscriptionSearchQuery = $event"
+            @applyDetectedName="handleApplyDetectedName"
+            @rename-group="handleRenameGroup"
         >
             <!-- Slot removed as user requested button move to dropdown -->
         </SubscriptionPanel>
@@ -162,7 +265,7 @@
                 </h3></template
             >
             <template #body
-                ><p class="text-sm text-gray-400">
+                ><p class="text-sm text-gray-500 dark:text-gray-400">
                     {{ t('subscriptions.deleteAllConfirmBody') }}
                 </p></template
             >
